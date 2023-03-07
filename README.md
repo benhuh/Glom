@@ -21,7 +21,7 @@ As an example, to run contrastive pre-training on CIFAR-10 on a single GPU, exec
 
 After running the pre-training you can run the training phase with:
 
-``CUDA_VISIBLE_DEVICES=0 python src/main.py --flagfile config/config_CIFAR10.cfg --resume_training --supervise --load_checkpoint_dir <path_to_checkpoint.ckpt>``
+``CUDA_VISIBLE_DEVICES=0 python src/main.py --flagfile config/config_CIFAR10.cfg  --supervise --ckpt_dir <path_to_checkpoint.ckpt>``
 
 To run testing or to freeze the network weights, set the 'mode' flag (e.g. ``--mode test`` or ``--mode freeze``). 
 Refer to [this page](src/flags_Agglomerator.py) for additional info about each flag.
@@ -32,7 +32,7 @@ Refer to [this page](src/flags_Agglomerator.py) for additional info about each f
 
 We provide [pre-trained models](https://drive.google.com/drive/folders/1fydLRfoyZVsKKZYgKHrjh2lfstLWGbh1?usp=sharing) that can be used to plot islands of agreement or fine-tune for image classification. To fine-tune a pretrained model, just run:
 
-``CUDA_VISIBLE_DEVICES=0 python src/main.py --flagfile config/config_CIFAR10.cfg --patch_size 1 --patch_dim 128 --resume_training --supervise --load_checkpoint_dir path_to_pretrained_model.ckpt``
+``CUDA_VISIBLE_DEVICES=0 python src/main.py --flagfile config/config_CIFAR10.cfg --patch_size 1 --patch_dim 128 --supervise --ckpt_dir path_to_pretrained_model.ckpt``
 
 ## Plotting islands of agreement
 

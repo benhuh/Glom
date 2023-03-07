@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 from typing import Any, Callable
 import numpy as np
 from matplotlib import pyplot as plt
-import cv2
+# import cv2
 
 
 def count_parameters(model):

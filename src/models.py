@@ -7,81 +7,47 @@ import pytorch_lightning as pl
 from utils import exists, default, SupConLoss, Siren, plot_islands_agreement
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+from argparse import Namespace
 
 TOKEN_ATTEND_SELF_VALUE = -5e-4
 
-class ConvTokenizer(pl.LightningModule):
-    def __init__(self, in_channels=3, embedding_dim=64):
-        super(ConvTokenizer, self).__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels,
-                      embedding_dim // 2,
-                      kernel_size=(3, 3),
-                      stride=(2, 2),
-                      padding=(1, 1),
-                      bias=False),
-            nn.BatchNorm2d(embedding_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(embedding_dim // 2,
-                      embedding_dim // 2,
-                      kernel_size=(3, 3),
-                      stride=(1, 1),
-                      padding=(1, 1),
-                      bias=False),
-            nn.BatchNorm2d(embedding_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(embedding_dim // 2,
-                      embedding_dim,
-                      kernel_size=(3, 3),
-                      stride=(1, 1),
-                      padding=(1, 1),
-                      bias=False),
-            nn.BatchNorm2d(embedding_dim),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(3, 3),
-                         stride=(2, 2),
-                         padding=(1, 1),
-                         dilation=(1, 1))
-        )
+def ConvTokenizer(in_channels=3, embedding_dim=64, patch_size=None):
+    return nn.Sequential(   nn.Conv2d(in_channels, embedding_dim // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False),
+                            nn.BatchNorm2d(embedding_dim // 2),
+                            nn.ReLU(inplace=True),
+                            nn.Conv2d(embedding_dim // 2, embedding_dim // 2, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False),
+                            nn.BatchNorm2d(embedding_dim // 2),
+                            nn.ReLU(inplace=True),
+                            nn.Conv2d(embedding_dim // 2, embedding_dim, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False),
+                            nn.BatchNorm2d(embedding_dim),
+                            nn.ReLU(inplace=True),
+                            nn.MaxPool2d(kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), dilation=(1, 1)),
+                            Rearrange('b d (h p1) (w p2) -> b (h w) (d p1 p2)', p1 = patch_size, p2 = patch_size), 
+                        )
 
-    def forward(self, x):
-        return self.block(x)
+def ColumnNet(FLAGS, dim, groups, mult = 4, activation = nn.GELU):
+    total_dim = dim * groups
+    num_patches = (FLAGS.conv_image_size // FLAGS.patch_size) ** 2
+    return  nn.Sequential(  Rearrange('b n l d -> b (l d) n'),
+                            nn.LayerNorm(num_patches),
+                            nn.Conv1d(total_dim, total_dim * mult, 1, groups = groups),
+                            activation(),
+                            nn.LayerNorm(num_patches),
+                            nn.Conv1d(total_dim * mult, total_dim, 1, groups = groups),
+                            Rearrange('b (l d) n -> b n l d', l = groups)
+                        )
 
-class ColumnNet(pl.LightningModule):
-    def __init__(self, FLAGS, dim, groups, mult = 4, activation = nn.GELU):
-        super().__init__()
-        self.FLAGS = FLAGS
-        total_dim = dim * groups
-        num_patches = (self.FLAGS.conv_image_size // self.FLAGS.patch_size) ** 2
-        
-        self.net = nn.Sequential(
-            Rearrange('b n l d -> b (l d) n'),
-            nn.LayerNorm(num_patches),
-            nn.Conv1d(total_dim, total_dim * mult, 1, groups = groups),
-            activation(),
-            nn.LayerNorm(num_patches),
-            nn.Conv1d(total_dim * mult, total_dim, 1, groups = groups),
-            Rearrange('b (l d) n -> b n l d', l = groups)
-        )
 
-    def forward(self, levels):
-        levels = self.net(levels)
-        return levels
-
-class ConsensusAttention(pl.LightningModule):
+class ConsensusAttention(nn.Module):
     def __init__(self, num_patches_side, attend_self = True, local_consensus_radius = 0):
         super().__init__()
         self.attend_self = attend_self
         self.local_consensus_radius = local_consensus_radius
 
         if self.local_consensus_radius > 0:
-            coors = torch.stack(torch.meshgrid(
-                torch.arange(num_patches_side),
-                torch.arange(num_patches_side)
-            )).float()
-
-            coors = rearrange(coors, 'c h w -> (h w) c')
-            dist = torch.cdist(coors, coors)
+            coords = torch.stack(torch.meshgrid( torch.arange(num_patches_side), torch.arange(num_patches_side) )).float()
+            coords = rearrange(coords, 'c h w -> (h w) c')
+            dist = torch.cdist(coords, coords)
             mask_non_local = dist > self.local_consensus_radius
             mask_non_local = rearrange(mask_non_local, 'i j -> () i j')
             self.register_buffer('non_local_mask', mask_non_local)
@@ -105,21 +71,23 @@ class ConsensusAttention(pl.LightningModule):
         out = einsum('b l i j, b j l d -> b i l d', attn, levels)
         return out
 
+##############################################
+
 class Agglomerator(pl.LightningModule):
-    def __init__(self,
-        FLAGS,
-        *,
-        consensus_self = False,
-        local_consensus_radius = 0
-        ):
-        super(Agglomerator, self).__init__()
+    def __init__(self, FLAGS, *, consensus_self = False, local_consensus_radius = 0):
+        super().__init__()
+        if not isinstance(FLAGS, Namespace):
+            FLAGS = Namespace(**FLAGS.flag_values_dict())
+        self.save_hyperparameters(FLAGS) # Errors out: "can't pickle FlagValues"
+
+        self.num_gpus = len(FLAGS.gpus)
         self.FLAGS = FLAGS
 
-        self.num_patches_side = (self.FLAGS.conv_image_size // self.FLAGS.patch_size)
-        self.num_patches =  self.num_patches_side ** 2
+        num_patches_side = (FLAGS.conv_image_size // FLAGS.patch_size)
+        num_patches =  num_patches_side ** 2
         self.features = []
         self.labels = []
-        self.iters = default(self.FLAGS.iters, self.FLAGS.levels * 2)
+        self.iters = default(FLAGS.iters, FLAGS.levels * 2)
         self.batch_acc = 0
 
         self.wl = torch.nn.parameter.Parameter(torch.tensor(0.25, device=self.device), requires_grad=True)
@@ -127,35 +95,38 @@ class Agglomerator(pl.LightningModule):
         self.wTD = torch.nn.parameter.Parameter(torch.tensor(0.25, device=self.device), requires_grad=True)
         self.wA = torch.nn.parameter.Parameter(torch.tensor(0.25, device=self.device), requires_grad=True)
 
-        self.image_to_tokens = nn.Sequential(
-            ConvTokenizer(in_channels=self.FLAGS.n_channels, embedding_dim=self.FLAGS.patch_dim // (self.FLAGS.patch_size ** 2)),
-            Rearrange('b d (h p1) (w p2) -> b (h w) (d p1 p2)', p1 = self.FLAGS.patch_size, p2 = self.FLAGS.patch_size),
-        )
+        self.image_to_tokens = ConvTokenizer(in_channels=FLAGS.n_channels, 
+                                             embedding_dim=FLAGS.patch_dim // (FLAGS.patch_size ** 2), 
+                                             patch_size = FLAGS.patch_size)
 
-        self.contrastive_head = nn.Sequential(
-            nn.LayerNorm(FLAGS.patch_dim),
-            nn.Dropout(p=self.FLAGS.dropout),
-            Rearrange('b n d -> b (n d)'),
-            nn.LayerNorm(self.num_patches * FLAGS.patch_dim),
-            nn.Dropout(p=self.FLAGS.dropout),
-            nn.Linear(self.num_patches * FLAGS.patch_dim, self.num_patches * FLAGS.patch_dim),
-            nn.LayerNorm(self.num_patches * FLAGS.patch_dim),
-            nn.GELU(),
-            nn.LayerNorm(self.num_patches * FLAGS.patch_dim),
-            nn.Dropout(p=self.FLAGS.dropout),
-            nn.Linear(self.num_patches * FLAGS.patch_dim, self.FLAGS.contr_dim)
-        )
+        self.contrastive_head = nn.Sequential(  nn.LayerNorm(FLAGS.patch_dim),
+                                                nn.Dropout(p=FLAGS.dropout),
+                                                Rearrange('b n d -> b (n d)'),
+                                                nn.LayerNorm(num_patches * FLAGS.patch_dim),
+                                                nn.Dropout(p=FLAGS.dropout),
+                                                nn.Linear(num_patches * FLAGS.patch_dim, num_patches * FLAGS.patch_dim),
+                                                nn.LayerNorm(num_patches * FLAGS.patch_dim),
+                                                nn.GELU(),
+                                                nn.LayerNorm(num_patches * FLAGS.patch_dim),
+                                                nn.Dropout(p=FLAGS.dropout),
+                                                nn.Linear(num_patches * FLAGS.patch_dim, FLAGS.contr_dim)   )
 
-        self.classification_head_from_contr = nn.Sequential(
-            nn.Linear(self.FLAGS.contr_dim, self.FLAGS.contr_dim),
-            nn.GELU(),
-            nn.Linear(self.FLAGS.contr_dim, self.FLAGS.n_classes)
-        )
+        self.classification_head_from_contr = nn.Sequential(nn.Linear(FLAGS.contr_dim, FLAGS.contr_dim),
+                                                            nn.GELU(),
+                                                            nn.Linear(FLAGS.contr_dim, FLAGS.n_classes)     )
 
-        self.init_levels = nn.Parameter(torch.randn(self.FLAGS.levels, FLAGS.patch_dim))
-        self.bottom_up = ColumnNet(self.FLAGS, dim = FLAGS.patch_dim, activation=nn.GELU, groups = self.FLAGS.levels)
-        self.top_down = ColumnNet(self.FLAGS, dim = FLAGS.patch_dim, activation=Siren, groups = self.FLAGS.levels - 1)
-        self.attention = ConsensusAttention(self.num_patches_side, attend_self = consensus_self, local_consensus_radius = local_consensus_radius)
+        self.init_levels = nn.Parameter(torch.randn(FLAGS.levels, FLAGS.patch_dim))
+        self.bottom_up = ColumnNet(FLAGS, dim = FLAGS.patch_dim, activation=nn.GELU, groups = FLAGS.levels)
+        self.top_down = ColumnNet(FLAGS, dim = FLAGS.patch_dim, activation=Siren, groups = FLAGS.levels - 1)
+        self.attention = ConsensusAttention(num_patches_side, attend_self = consensus_self, local_consensus_radius = local_consensus_radius)
+
+        self.load_chkp(FLAGS)
+
+    def load_chkp(self, FLAGS):
+        if FLAGS.ckpt_dir: # is not None: # FLAGS.resume_training 
+            import os
+            dir = os.path.join(os.getcwd(), FLAGS.ckpt_dir)
+            self.load_from_checkpoint(dir, FLAGS=FLAGS, strict=False)
 
     def forward(self, img, levels = None):
         b, device = img.shape[0], img.device
@@ -184,12 +155,10 @@ class Agglomerator(pl.LightningModule):
 
             consensus = self.attention(levels)
 
-            levels_sum = torch.stack((
-                levels * self.wl, \
-                bottom_up_out * self.wBU, \
-                top_down_out * self.wTD, \
-                consensus * self.wA
-            )).sum(dim = 0)
+            levels_sum = torch.stack((  levels * self.wl, \
+                                        bottom_up_out * self.wBU, \
+                                        top_down_out * self.wTD, \
+                                        consensus * self.wA           )).sum(dim = 0)
             levels_mean = levels_sum / rearrange(num_contributions, 'l -> () () l ()')
 
             self.log('Weights/wl', self.wl)
@@ -210,9 +179,8 @@ class Agglomerator(pl.LightningModule):
         return top_level, all_levels[-1,0,:,:,:]
 
     def training_step(self, train_batch, batch_idx):
-        image = train_batch[0]
-        label = train_batch[1]
-        self.training_batch_idx = batch_idx
+        image, label = train_batch[0:2]
+        # self.training_batch_idx = batch_idx
 
         if(not self.FLAGS.supervise):
             image = torch.cat([image[0], image[1]], dim=0)
@@ -235,13 +203,13 @@ class Agglomerator(pl.LightningModule):
             self.batch_acc = 0
 
         else:
-            f1, f2 = torch.split(top_level, [self.FLAGS.batch_size // self.FLAGS.num_gpus, self.FLAGS.batch_size // self.FLAGS.num_gpus], dim=0)
+            f1, f2 = torch.split(top_level, [self.FLAGS.batch_size // self.num_gpus, self.FLAGS.batch_size // self.num_gpus], dim=0)
             output = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
             criterion = SupConLoss(temperature=self.FLAGS.temperature)
             loss = criterion(output, label)
 
         self.log('Training/loss', loss, sync_dist=True)
-        self.log('Training/LR', self.optimizer.param_groups[0]['lr'], prog_bar=True, sync_dist=True)
+        # self.log('Training/LR', self.optimizer.param_groups[0]['lr'], prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, val_batch, batch_idx):
@@ -249,10 +217,10 @@ class Agglomerator(pl.LightningModule):
         label = val_batch[1]
         self.val_batch_idx = batch_idx
 
-        if(not self.FLAGS.supervise):
+        if (not self.FLAGS.supervise):
             image = torch.cat([image[0], image[1]], dim=0)
 
-        if(self.FLAGS.supervise):
+        if (self.FLAGS.supervise):
             with torch.no_grad():
                 top_level, _ = self.forward(image)
                 self.features.append(list(top_level.data.cpu().numpy()))
@@ -262,7 +230,7 @@ class Agglomerator(pl.LightningModule):
             if(self.FLAGS.plot_islands):
                 plot_islands_agreement(toplot, image[0,:,:,:])
 
-        if(self.FLAGS.supervise):
+        if (self.FLAGS.supervise):
             output = self.classification_head_from_contr(top_level)
             loss = F.cross_entropy(output, label)
             self.batch_acc = self.accuracy(output.data,label,topk=(1,))[0]
@@ -270,7 +238,7 @@ class Agglomerator(pl.LightningModule):
             self.batch_acc = 0
 
         else:
-            f1, f2 = torch.split(top_level, [self.FLAGS.batch_size // self.FLAGS.num_gpus, self.FLAGS.batch_size // self.FLAGS.num_gpus], dim=0)
+            f1, f2 = torch.split(top_level, [self.FLAGS.batch_size // self.num_gpus, self.FLAGS.batch_size // self.num_gpus], dim=0)
             output = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
             criterion = SupConLoss(temperature=self.FLAGS.temperature)
             loss = criterion(output, label)
@@ -303,7 +271,7 @@ class Agglomerator(pl.LightningModule):
             self.log('Test/accuracy', self.batch_acc, prog_bar=True, sync_dist=True)
 
         else:
-            f1, f2 = torch.split(top_level, [self.FLAGS.batch_size // self.FLAGS.num_gpus, self.FLAGS.batch_size // self.FLAGS.num_gpus], dim=0)
+            f1, f2 = torch.split(top_level, [self.FLAGS.batch_size // self.num_gpus, self.FLAGS.batch_size // self.num_gpus], dim=0)
             output = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
             criterion = SupConLoss(temperature=self.FLAGS.temperature)
             loss = criterion(output, label)

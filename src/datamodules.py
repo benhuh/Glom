@@ -7,14 +7,12 @@ from pl_bolts.utils import _TORCHVISION_AVAILABLE
 from pl_bolts.utils.warnings import warn_missing_pkg
 
 import struct
-from itertools import groupby
-from os import makedirs
-from os.path import exists
-from os.path import join
+# from itertools import groupby
+# from os import makedirs
+# from os.path import exists
+# from os.path import join
 
-import matplotlib.pyplot as plt
 import numpy as np
-from tqdm import tqdm
 
 import os
 import errno
@@ -26,8 +24,6 @@ import numpy as np
 from PIL import Image
 from torchvision.datasets.utils import download_url, check_integrity
 
-import pytorch_lightning as pl
-import pl_bolts
 
 if _TORCHVISION_AVAILABLE:
     from torchvision import transforms as transform_lib
@@ -210,11 +206,11 @@ class SmallNORB(data.Dataset):
             mode ``stereo'':
                 tuple: (image left, image right, target, info)
         """
-        target = self.labels[index % 24300] if self.mode is "all" else self.labels[index]
+        target = self.labels[index % 24300] if self.mode == "all" else self.labels[index]
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        info = self.infos[index % 24300] if self.mode is "all" else self.infos[index]
+        info = self.infos[index % 24300] if self.mode == "all" else self.infos[index]
         if self.info_transform is not None:
             info = self.info_transform(info)
 

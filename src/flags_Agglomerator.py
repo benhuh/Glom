@@ -2,6 +2,7 @@ from absl import flags
 
 flags.DEFINE_string('dataset', 'CIFAR10', 'Dataset name.')
 flags.DEFINE_string('exp_name', 'CIFAR10', 'Experiment name.')
+flags.DEFINE_string('logger', 'tensorboard', 'logger type: tensorboard or wandb.')
 
 # NETWORK PARAMETERS
 
@@ -25,15 +26,16 @@ flags.DEFINE_integer('contr_dim', 512, 'Contrastive hidden dimension.')
 flags.DEFINE_string('mode', 'train', 'train/test/freeze.')
 flags.DEFINE_float('learning_rate', 0.05, 'Learning rate.')
 flags.DEFINE_float('lr_speed', 2000, 'Learning rate scheduler speed.')
-flags.DEFINE_boolean('resume_training', False,
-                     'Resume training using a checkpoint.')
-flags.DEFINE_string('load_checkpoint_dir', 'path_to_checkpoint.ckpt',
-                    'Load previous existing checkpoint.')
+
+# flags.DEFINE_boolean('resume_training', False, 'Resume training using a checkpoint.')
+# flags.DEFINE_string('load_checkpoint_dir', 'path_to_checkpoint.ckpt', 'Load previous existing checkpoint.')
+flags.DEFINE_string('ckpt_dir', None, 'Load previous existing checkpoint.')
 flags.DEFINE_integer('seed', 42, 'Seed.')
 flags.DEFINE_integer('max_epochs', 10000, 'Number of training epochs.')
 flags.DEFINE_float('weight_decay', 5e-4, 'Weight decay.')
-flags.DEFINE_integer('num_workers', 8, 'Number of workers.')
-flags.DEFINE_integer('num_gpus', 1, 'Number of gpus.')
+flags.DEFINE_integer('num_workers', 16, 'Number of workers.')
+# flags.DEFINE_integer('num_gpus', 1, 'Number of gpus.')
+flags.DEFINE_list('gpus', [0], 'available gpus to use.')
 
 flags.DEFINE_float('limit_train', 1.0, 'Limit train set.')
 flags.DEFINE_float('limit_val', 1.0, 'Limit val set.')
